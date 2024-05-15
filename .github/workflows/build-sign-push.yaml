@@ -1,0 +1,70 @@
+name: build/push/sign quay.io/sallyom/centos-bootc images with manual trigger
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: quay.io/sallyom
+  CHATBOT_BOOTC_IMAGE_NAME: centos-bootc
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # needed for signing the images with GitHub OIDC Token
+
+    steps:
+      - name: Remove unnecessary files
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+      - uses: actions/checkout@v4.1.5
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.5.0
+
+      - name: Login to quay.io
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: quay.io
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      # required for multi-arch builds
+      - name: Install qemu dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      - name: Build centos-bootc
+        id: build_centos_bootc
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ env.CHATBOT_BOOTC_IMAGE_NAME }}
+          tags: latest ${{ github.sha }}
+          platforms: linux/arm64, linux/amd64
+          containerfiles: ./centos-bootc/Containerfile
+          build-args: |
+            SSHPUBKEY=${{ secrets.SSH_PUBKEY }}
+          context: centos-bootc
+
+      - name: Push centos-bootc image
+        id: push_centos_bootc
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          image: ${{ steps.build_centos_bootc.outputs.image }}
+          tags: ${{ steps.build_centos_bootc.outputs.tags }}
+
+      - name: Sign the images with GitHub OIDC Token
+        env:
+          TAGS: ${{ steps.build_centos_bootc.outputs.tags }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${{ env.REGISTRY }}/${{ steps.build_centos_bootc.outputs.image }}:${tag} "
+          done
+          cosign sign --yes ${images}
